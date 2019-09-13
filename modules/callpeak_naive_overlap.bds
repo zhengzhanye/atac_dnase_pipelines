@@ -1,0 +1,300 @@
+#!/usr/bin/env bds
+#vim: syntax=java
+
+include "species.bds"
+include "module_template.bds"
+
+
+help == callpeak naive overlap settings
+nonamecheck	:= false        help bedtools intersect -nonamecheck (bedtools>=2.24.0, use this if you get bedtools intersect naming convenction warnings/errors).
+
+grp_color_naive_overlap := "skyblue"
+grp_color_peak_overlap_final := "green"
+
+init_callpeak_naive_overlap()
+
+
+void init_callpeak_naive_overlap() {
+
+        nonamecheck	= get_conf_val_bool( nonamecheck, ["nonamecheck"] )
+
+        print("\n\n== callpeak naiver overlap settings\n")
+        print( "Bedtools intersect -nonamecheck\t: $nonamecheck\n")
+}
+
+string naive_overlap_peak( string filetype, string peak_rep1, string peak_rep2, string peak_pooled, \
+			    string o_dir, string group ) {
+
+	prefix 		:= "$o_dir/" + (title=="" ? "" : (title+"_") ) + group	
+	// prefix 	:= replace_dir( rm_ext( peak_pooled, \
+	// 			["regionPeak","regionpeak","narrowPeak","narrowpeak",\
+	// 			 "broadPeak","broadpeak","gappedPeak","gappedpeak",filetype] ), o_dir )
+
+	peak_PooledInRep1AndRep2 	:= "$prefix.PooledInRep1AndRep2.$filetype.gz"
+	peak_final 			:= "$prefix.naive_overlap.$filetype.gz"
+	filt_peak_final 		:= "$prefix.naive_overlap.filt.$filetype.gz"
+
+	awk_param := _get_awk_param( filetype ) 
+	cut_param := _get_cut_param( filetype )
+	nonamecheck_param := nonamecheck ? "-nonamecheck" : ""
+
+	string cmd1
+	if ( path_exists( blacklist ) ) {
+		cmd1 = "bedtools intersect -v -a <(zcat -f $peak_final) -b <(zcat -f $blacklist) "+\
+			" | grep -P 'chr[\\dXY]+[ \\t]'"+\
+			" | awk 'BEGIN{OFS=\"\\t\"} {if ($5>1000) $5=1000; print $0}'"+\
+			" | gzip -nc > $filt_peak_final"
+	}
+	else {
+		cmd1 = "echo"
+	}
+
+	in 	:= [ peak_pooled, peak_rep1, peak_rep2 ]
+	out 	:= path_exists(blacklist) ? filt_peak_final : peak_final
+	
+	taskName:= "naive_overlap " + group
+	timeout := 3600 // to get queued fast
+
+	wait_par( cpus )
+
+	tid := task( out<-in ) {
+
+		sys $shcmd_init
+
+		//# Find pooled peaks that overlap Rep1 and Rep2 where overlap is defined as the fractional overlap wrt any one of the overlapping peak pairs  >= 0.5
+		sys intersectBed $nonamecheck_param -wo -a <(zcat -f $peak_pooled) -b <(zcat -f $peak_rep1) | \
+			awk 'BEGIN{FS="\t";OFS="\t"} $awk_param' | cut -f $cut_param | sort | uniq | \
+			intersectBed $nonamecheck_param -wo -a stdin -b <(zcat -f $peak_rep2) | \
+			awk 'BEGIN{FS="\t";OFS="\t"} $awk_param' | cut -f $cut_param | sort | uniq | gzip -nc > $peak_PooledInRep1AndRep2
+
+		//# Combine peak lists
+		sys zcat $peak_PooledInRep1AndRep2 | sort | uniq | gzip -nc > $peak_final
+
+		sys $cmd1
+
+		sys rm -f $peak_PooledInRep1AndRep2
+
+		sys $shcmd_finalize
+	}
+
+	register_par( tid, cpus )
+
+	add_task_to_graph( in, out, group, "NAIVE\\nOVERLAP\\n" + _get_short_filetype(filetype), grp_color_naive_overlap )
+			   
+	return out
+}
+
+// peak_overlap_tr: overlapping peaks for true replicate (key:"rep_id1,rep_id2") e.g. "1,2" for rep1 and rep2
+// peak_overlap_pr: overlapping peaks for pseudo replicates (key:"rep") e.g. "1" for pseudo replicates of replicate 1
+string[] peak_overlap_final_qc( string{} peak_overlap_tr, string{} peak_overlap_pr, string peak_overlap_ppr, \
+			string peak_overlap_o_dir, string qc_o_dir, string group ) {
+	//// get # of lines in each IDR peak files
+
+	// pseudo replicates
+	int[] N
+	for ( string peak : peak_overlap_pr ) N.add( get_num_lines( peak ) )
+
+	// true replicates
+	Nt := 0
+	string peak_overlap_tr_best, key_tr_best
+
+	for ( string key : peak_overlap_tr.keys() ) { // key = rep id 1, rep id 2
+
+		peak := peak_overlap_tr{ key }
+		nlines := ( peak != "" ) ? get_num_lines( peak ) : 0
+
+		if ( nlines >= Nt ) {
+			Nt = nlines
+			peak_overlap_tr_best = peak
+			key_tr_best = key
+		}
+	}
+
+	// pooled pseudo replicates
+	Np := ( peak_overlap_ppr != "" ) ? get_num_lines( peak_overlap_ppr ) : 0
+
+	//// find optimal set and conservative set
+	string optimal_set, conservative_set
+	int N_opt, N_consv
+	string peak_overlap_opt_set, peak_overlap_consv_set
+	string peak_overlap_opt_set_new, peak_overlap_consv_set_new // copy of above two
+
+	if ( Nt > 0 ) {
+
+		// optimal set
+		optimal_set 	= (Nt > Np) ? _get_group_from_key(key_tr_best) : "pooled_pseudo_rep"
+		peak_overlap_opt_set 	= (Nt > Np) ? peak_overlap_tr_best : peak_overlap_ppr
+		N_opt 		= (Nt > Np) ? Nt : Np
+
+		// conservative set
+		conservative_set= _get_group_from_key(key_tr_best)
+		peak_overlap_consv_set  	= peak_overlap_tr_best
+		N_consv 	= Nt
+	}
+	else {
+		optimal_set 	= "self_pseudo_rep_rep1"
+		peak_overlap_opt_set 	= peak_overlap_pr{1}
+		N_opt 		= N[0]
+
+		conservative_set= optimal_set
+		peak_overlap_consv_set  	= peak_overlap_opt_set
+		N_consv 	= N_opt
+	}
+
+	// make copies of them
+	peak_overlap_opt_o_dir 		:= mkdir( "$peak_overlap_o_dir/optimal_set" )
+	peak_overlap_consv_o_dir 	:= mkdir( "$peak_overlap_o_dir/conservative_set" )
+
+	peak_overlap_opt_set_new	= copy( peak_overlap_opt_set, peak_overlap_opt_o_dir )	
+	peak_overlap_consv_set_new 	= copy( peak_overlap_consv_set, peak_overlap_consv_o_dir )
+	
+	wait
+
+	//// compute IDR scores
+
+	real max_Np_Nt = _max( Np, Nt )
+	real min_Np_Nt = _min( Np, Nt )
+
+	real max_N = N.size() > 0 ? _max( N ) : 0
+	real min_N = N.size() > 0 ? _min( N ) : 0
+
+	real rescue_ratio, self_consistency_ratio
+	if ( min_Np_Nt > 0 )	rescue_ratio 		= max_Np_Nt / min_Np_Nt
+	else 			rescue_ratio 		= 0.0
+	if ( min_N> 0 )  	self_consistency_ratio 	= max_N / min_N
+	else 			self_consistency_ratio 	= 1.0
+	reproducibility 	:= "pass"
+
+	if ( rescue_ratio > 2.0 || self_consistency_ratio > 2.0 ) reproducibility = "borderline" // BORDERLINE
+	if ( rescue_ratio > 2.0 && self_consistency_ratio > 2.0 ) reproducibility = "fail" // FAIL
+	
+	// write on IDR FINAL QC file
+	prefix 	:= "$qc_o_dir/" + (title=="" ? "" : (title+"_") ) + group
+	qc 	:= prefix+"peak_overlap_final.qc"
+
+	in 	:= map_to_array( peak_overlap_tr ) + map_to_array( peak_overlap_pr ); if (peak_overlap_ppr!="") in += [peak_overlap_ppr]
+	out 	:= qc
+
+	string col_lbl, col_val
+	if ( N.size() == 0 ) {
+		col_lbl = ""
+		col_val = ""
+	}
+	else if ( N.size() == 1 ) {
+		col_lbl = "N1\tN2\t"
+		col_val = (N[0] + "\t0" + "\t")
+	}
+	else {
+		for ( int rep=1; rep<=N.size(); rep++) col_lbl += "N$rep\t"
+		col_val = (N.join("\t") + "\t")
+	}
+
+	taskName:= "naive overlap final qc" + group
+
+	wait_par( cpus )
+
+	tid := task( out<-in ) {
+
+		sys $shcmd_init
+
+		sys echo -e "Nt\t$col_lbl""Np\tN_opt\tN_consv\topt_set\tconsv_set\trescue_ratio\tself_consistency_ratio\treproducibility_test" > $qc
+		sys echo -e "$Nt\t$col_val""$Np\t$N_opt\t$N_consv\t$optimal_set\t$conservative_set\t$rescue_ratio\t$self_consistency_ratio\t$reproducibility" >> $qc
+
+		sys $shcmd_finalize
+	}
+
+	register_par( tid, cpus )
+
+	add_task_to_graph( in, out, group, "Naive overlap\\nQC", grp_color_peak_overlap_final )
+
+	return [qc, peak_overlap_opt_set_new, peak_overlap_consv_set_new]
+}
+
+// input peaks are already blacklist-filtered
+string overlap_gpeak_over_npeak( string gpeak, string npeak, string o_dir, string group ) {
+
+	prefix 	:= replace_dir( rm_ext( gpeak, ["gappedPeak","gappedpeak"] ), o_dir )
+	gpeak_filt := "$prefix.filt_thru_npeak.gappedPeak.gz"
+
+	in 	:= [ gpeak, npeak ]
+	out 	:= gpeak_filt
+
+	taskName:= "overlap g/n " + group
+
+	wait_par( cpus )
+
+	tid := task( out<-in ) {
+
+		sys $shcmd_init
+
+		sys bedtools intersect -wa -u -a <(zcat -f $gpeak) -b <(zcat -f $npeak) | gzip -nc > $gpeak_filt
+
+		sys $shcmd_finalize
+	}
+
+	register_par( tid, cpus )
+	add_task_to_graph( in, out, group )
+
+	return out
+}
+
+string _get_awk_param( string filetype ) {
+
+	if ( filetype.toLower() == "narrowpeak" || filetype.toLower() == "regionpeak" ) {
+
+		return "{s1=$3-$2; s2=$13-$12; if (($21/s1 >= 0.5) || ($21/s2 >= 0.5)) {print $0}}"
+	}
+	else if ( filetype.toLower() == "broadpeak") { 
+
+		return "{s1=$3-$2; s2=$12-$11; if (($19/s1 >= 0.5) || ($19/s2 >= 0.5)) {print $0}}"
+	}
+	else if ( filetype.toLower() == "gappedpeak") { 
+
+		return "{s1=$3-$2; s2=$18-$17; if (($31/s1 >= 0.5) || ($31/s2 >= 0.5)) {print $0}}"
+	}
+	else {
+		error("Unsupport peak file type! ($filetype)\n")
+	}
+}
+
+string _get_cut_param( string filetype ) {
+
+	if ( filetype.toLower() == "narrowpeak" || filetype.toLower() == "regionpeak" ) {
+
+		return "1-10"
+	}
+	else if ( filetype.toLower() == "broadpeak") { 
+
+		return "1-9"
+	}
+	else if ( filetype.toLower() == "gappedpeak") { 
+
+		return "1-15"
+	}
+	else {
+		error("Unsupport peak file type! ($filetype)\n")
+	}
+}
+
+string _get_short_filetype( string filetype ) {
+
+	if ( filetype.toLower() == "narrowpeak" ) {
+
+		return "n. peak"
+	}
+	else if ( filetype.toLower() == "regionpeak" ) {
+
+		return "r. peak"
+	}
+	else if ( filetype.toLower() == "broadpeak") { 
+
+		return "b. peak"
+	}
+	else if ( filetype.toLower() == "gappedpeak") { 
+
+		return "g. peak"
+	}
+	else {
+		error("Unsupport peak file type! ($filetype)\n")
+	}	
+}

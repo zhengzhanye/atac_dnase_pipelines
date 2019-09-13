@@ -1,0 +1,80 @@
+#!/usr/bin/env bds
+#vim: syntax=java
+
+include "conf.bds"
+
+
+help == adapter sequence definition :
+help         Single-ended : For replicate '-adapter[REP_ID]'
+help         Paired end : For replicate '-adapter[REP_ID]_[PAIR_ID]'
+
+
+string{} get_adapter( int ctl, int rep, int p ) {
+	// allow up to 99 adapters to be pooled (i.e. adapter1 adapter1:2 adapter1:3, ...)
+	string{} result
+	for ( int i=0; i<100; i++ ) {
+		suffix := i ? ":$i" : ""
+		key_wo_p := ( ctl > 0 ? "ctl_adapter" : "adapter" ) + "_rep" + rep
+		key := key_wo_p + "_p" + p + suffix
+		key_wo_p += suffix
+
+		key_wo_p2 := ( ctl > 0 ? "ctl_adapter" : "adapter" ) + rep
+		key2 := key_wo_p2 + "_" + p + suffix
+		key_wo_p2 += suffix
+
+		key_wo_p3 := ( ctl > 0 ? "ctl_adapter" : "adapter" )
+		key3 := key_wo_p3 + "_" + p + suffix
+		key_wo_p3 += suffix
+
+		formatted_i := format_digit(i,2)
+		if ( (p==1) && cmd_line_arg_has_key( key_wo_p ) ) {
+			result{formatted_i}= get_cmd_line_arg_val( key_wo_p )
+		}
+		else if ( (p==1) && cmd_line_arg_has_key( key_wo_p2 ) ) {
+			result{formatted_i}= get_cmd_line_arg_val( key_wo_p2 )
+		}
+		else if ( (p==1) && (rep==1) && cmd_line_arg_has_key( key_wo_p3 ) ) {
+			result{formatted_i}= get_cmd_line_arg_val( key_wo_p3 )
+		}
+		else if ( cmd_line_arg_has_key( key ) ) {
+			result{formatted_i}= get_cmd_line_arg_val( key )
+		}
+		else if ( cmd_line_arg_has_key( key2 ) ) {
+			result{formatted_i}= get_cmd_line_arg_val( key2 )
+		}	
+		else if ( (rep==1) && cmd_line_arg_has_key( key3 ) ) {
+			result{formatted_i}= get_cmd_line_arg_val( key3 )
+		}
+		else if ( (p==1) && conf.hasKey( key_wo_p ) ) {
+			result{formatted_i}= conf{ key_wo_p }
+		}
+		else if ( (p==1) && conf.hasKey( key_wo_p2 ) ) {
+			result{formatted_i}= conf{ key_wo_p2 }
+		}
+		else if ( (p==1) && (rep==1) && conf.hasKey( key_wo_p3 ) ) {
+			result{formatted_i}= conf{ key_wo_p3 }
+		}
+		else if ( conf.hasKey( key ) ) {
+			result{formatted_i}= conf{ key }
+		}
+		else if ( conf.hasKey( key2 ) ) {
+			result{formatted_i}= conf{ key2 }
+		}
+		else if ( (rep==1) && conf.hasKey( key3 ) ) {
+			result{formatted_i}= conf{ key3 }
+		}
+	}
+	return result
+}
+
+int get_num_rep_adapter( int ctl ) {
+	rep := 1
+	while( get_adapter( ctl, rep, 1 ).size() > 0 ) rep++
+
+	num_rep := rep-1	
+	return num_rep
+}
+
+int get_num_rep_adapter() {
+	return get_num_rep_adapter( 0 )
+}
